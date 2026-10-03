@@ -32,7 +32,7 @@ COMMON_PACKAGE_PATHS = {
 }
 GENERATED_PACKAGE_PATHS = {".cargo_vcs_info.json", "Cargo.toml.orig"}
 PACKAGE_BOUNDARIES = {
-    "unified-player": ({"README.md", "build.rs"}, ("src/",)),
+    "unified-player": ({"README.md", "build.rs"}, ("src/", "tests/")),
     "lyric_finder": ({"rustfmt.toml"}, ("examples/", "src/")),
 }
 SENSITIVE_FILENAMES = {
