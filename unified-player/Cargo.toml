@@ -66,7 +66,7 @@ clap_complete = "4.6.6"
 which = "8.0.4"
 fuzzy-matcher = { version = "0.3.7", optional = true }
 html-escape = "0.2.13"
-rustls = { version = "0.23.41", default-features = false, features = ["ring"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring"] }
 unicode-bidi = "0.3.18"
 url = "2.5.8"
 futures = "0.3.32"

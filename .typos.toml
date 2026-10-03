@@ -14,3 +14,8 @@ typ = "typ"
 ratatui = "ratatui"
 clen = "clen"
 WRONLY = "WRONLY"
+# librespot's `PlayerEvent::Seeked` and its diagnostic label
+Seeked = "Seeked"
+seeked = "seeked"
+# A fictional artist in the offline showcase catalog
+Vey = "Vey"
