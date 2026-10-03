@@ -37,7 +37,7 @@ table only lists what exists; it is not a roadmap.
 
 | Surface | Windows | Linux | macOS |
 | --- | --- | --- | --- |
-| Interface, Spotify library, and switching services | Verified | Verified (2026-10-03) | Implemented; CI can build and test it, not tried by hand |
+| Interface, Spotify library, and switching services | Verified | Verified (2026-10-03) | Implemented; builds and passes tests in CI (2026-10-04), not tried by hand |
 | Spotify playback on this computer | Verified with `rodio-backend` | Verified with `rodio-backend` (2026-10-03) | Implemented |
 | YouTube Music playback | Verified | Failing: `media_forbidden` (2026-10-03) | Implemented |
 | Media controls | Verified for Spotify when explicitly enabled; disabled by default because Winit can affect focus | Implemented through MPRIS, on by default; not yet tried by hand | Implemented for Spotify; disabled by default because Winit can affect focus |
@@ -87,7 +87,7 @@ browser work rather than producing a shareable static support report.
 | In-app controls | Implemented | One Diagnostics row with a masked passphrase and explicit confirmations; private capture contents never appear in the interface |
 | CLI | Implemented | `youtube debug-capture`; terminal-only passphrase and explicit network/sensitive/destructive acknowledgements |
 | Masked private inspector | Implemented, human-only | Separately acknowledged `inspect` authorizes interactive stdout before decryption, masks credential/signed URL values, labels normalized JSON, withholds opaque bodies, rejects redirection, and provides no raw/byte-exact mode |
-| Automated tests | Implemented | Feature, security, permission, and lifecycle tests; CI can run them on Windows, Linux, and macOS |
+| Automated tests | Implemented | Feature, security, permission, and lifecycle tests; they pass in CI on Windows, Linux, and macOS (2026-10-04) |
 | Manual testing | Pending | Not yet tried by hand end to end on any platform |
 
 The feature stays off by default. Raw encrypted
