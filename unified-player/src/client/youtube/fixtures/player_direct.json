@@ -1,0 +1,15 @@
+{
+  "playabilityStatus": { "status": "OK" },
+  "streamingData": {
+    "adaptiveFormats": [
+      {
+        "itag": 140,
+        "url": "https://rr1---sn-fixture.googlevideo.com/videoplayback?expire=1&itag=140&clen=1024",
+        "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+        "bitrate": 129000,
+        "contentLength": "1024",
+        "approxDurationMs": "5000"
+      }
+    ]
+  }
+}

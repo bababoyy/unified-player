@@ -1,0 +1,163 @@
+name: Binary packaging rehearsal
+
+# This workflow builds candidates only when an operator explicitly requests it.
+# It has no tag/push/PR trigger and no GitHub Release publication step.
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact 40-character commit SHA of the selected branch
+        required: true
+        type: string
+      platform:
+        description: Candidate platform (all starts four build runners)
+        type: choice
+        default: linux
+        options: [linux, macos-intel, macos-arm, windows, all]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: binary-rehearsal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  select:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Bind rehearsal to the selected commit
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          SELECTED_SHA: ${{ github.sha }}
+        run: |
+          if [[ ! "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] || [[ "$CANDIDATE_SHA" != "$SELECTED_SHA" ]]; then
+            echo 'Candidate SHA must exactly match the selected branch commit.'
+            exit 1
+          fi
+      - name: Select native runners and pinned tool archives
+        id: matrix
+        env:
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          candidates = [
+              dict(platform="linux", runner="ubuntu-22.04", target="x86_64-unknown-linux-gnu",
+                   checksum="4b3f0a5f0ebbdb798f6db649d01b32ba1518376b6f7a0502b7d92b75cc2c8293"),
+              dict(platform="macos-intel", runner="macos-15-intel", target="x86_64-apple-darwin",
+                   checksum="6a49bfb61bd86770d79c27f3d2b40c6b2e71cde940d3d31a6ccaaffc124d7a29"),
+              dict(platform="macos-arm", runner="macos-15", target="aarch64-apple-darwin",
+                   checksum="7b3cbe25511de01d74c0f5fcb7909edabd379bea9cfa284d93af5a3cdfa3247c"),
+              dict(platform="windows", runner="windows-2022", target="x86_64-pc-windows-msvc",
+                   checksum="9a36d70795e14326a5ec4bf17aee085df00ab85a322739291ea5d4b1b5f693cd"),
+          ]
+          selected = [c for c in candidates if os.environ["PLATFORM"] in ("all", c["platform"])]
+          if not selected:
+              raise SystemExit("Unknown candidate platform")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("matrix=" + json.dumps({"include": selected}) + "\n")
+          PY
+
+  package:
+    needs: select
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.select.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_INCREMENTAL: "0"
+      DIST_TARGET: ${{ matrix.target }}
+    steps:
+      - name: Checkout the reviewed commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # 2026-07-26
+        with:
+          toolchain: 1.96.1
+          targets: ${{ matrix.target }}
+      - name: Install Linux build libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libasound2-dev libdbus-1-dev
+      - name: Install checksum-pinned cargo-dist
+        env:
+          DIST_CHECKSUM: ${{ matrix.checksum }}
+        run: |
+          python - <<'PY'
+          import hashlib, io, os, pathlib, tarfile, urllib.request, zipfile
+          target = os.environ["DIST_TARGET"]
+          windows = target.endswith("windows-msvc")
+          suffix = ".zip" if windows else ".tar.xz"
+          name = "cargo-dist-" + target + suffix
+          url = "https://github.com/axodotdev/cargo-dist/releases/download/v0.33.0/" + name
+          data = urllib.request.urlopen(url, timeout=60).read()
+          if hashlib.sha256(data).hexdigest() != os.environ["DIST_CHECKSUM"]:
+              raise SystemExit("cargo-dist checksum mismatch")
+          executable = "dist.exe" if windows else "dist"
+          if windows:
+              with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                  members = [n for n in archive.namelist() if pathlib.PurePosixPath(n).name == executable]
+                  if len(members) != 1:
+                      raise SystemExit("Unexpected cargo-dist archive")
+                  binary = archive.read(members[0])
+          else:
+              with tarfile.open(fileobj=io.BytesIO(data), mode="r:xz") as archive:
+                  members = [m for m in archive.getmembers() if m.isfile() and pathlib.PurePosixPath(m.name).name == executable]
+                  if len(members) != 1:
+                      raise SystemExit("Unexpected cargo-dist archive")
+                  binary = archive.extractfile(members[0]).read()
+          folder = pathlib.Path(os.environ["RUNNER_TEMP"]) / "cargo-dist-0.33.0"
+          folder.mkdir(exist_ok=True)
+          tool = folder / executable
+          tool.write_bytes(binary)
+          tool.chmod(0o755)
+          with open(os.environ["GITHUB_PATH"], "a") as output:
+              output.write(str(folder) + "\n")
+          PY
+      - name: Validate bundled assets and plan without building
+        run: |
+          python scripts/check_ejs_assets.py
+          python scripts/check_publication_surface.py --tracked-only
+          dist plan --output-format=json > dist-plan.json
+      - name: Build native archive and report linked libraries
+        run: dist build --artifacts=local --target="$DIST_TARGET" --print=linkage --output-format=json > dist-build.json
+      - name: Generate installer scripts for review
+        if: runner.os == 'Linux'
+        run: dist build --artifacts=global --output-format=json > dist-installers.json
+      - name: Collect only declared packaging outputs
+        id: artifacts
+        run: |
+          python - <<'PY'
+          import json, os, pathlib
+          files = [pathlib.Path("dist-plan.json"), pathlib.Path("dist-build.json")]
+          for manifest in ("dist-build.json", "dist-installers.json"):
+              if pathlib.Path(manifest).is_file():
+                  files.append(pathlib.Path(manifest))
+                  files.extend(pathlib.Path(p) for p in json.loads(pathlib.Path(manifest).read_text())["upload_files"])
+          paths = sorted({str(p.resolve()) for p in files})
+          if any(not pathlib.Path(p).is_file() for p in paths):
+              raise SystemExit("A declared packaging output is missing")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("paths<<PACKAGING_OUTPUTS\n" + "\n".join(paths) + "\nPACKAGING_OUTPUTS\n")
+          PY
+      - name: Upload rehearsal outputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unified-player-rehearsal-${{ matrix.target }}-${{ github.sha }}
+          path: ${{ steps.artifacts.outputs.paths }}
+          if-no-files-found: error
+          retention-days: 7

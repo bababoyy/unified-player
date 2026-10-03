@@ -1,0 +1,28 @@
+schema_version = 1
+upstream_repository = "https://github.com/yt-dlp/ejs"
+upstream_tag = "0.8.0"
+upstream_commit = "4fb477f4af56880cfd324c48bd4294a2d2294e50"
+generated_by = "yt-dlp/ejs"
+protocol = "player-v1"
+
+[assets.lib]
+path = "yt.solver.lib.js"
+source = "https://github.com/yt-dlp/ejs/releases/download/0.8.0/yt.solver.lib.js"
+sha256 = "770831DF5C46474FBFF06732315B28F4FB090E427CA669A51DA61E2457D41C82"
+
+[assets.core]
+path = "yt.solver.core.js"
+source = "https://github.com/yt-dlp/ejs/releases/download/0.8.0/yt.solver.core.js"
+sha256 = "CA259E4E3CDD37D92FC266D9AF08D4FD66DA8479E240F4D984F29DA402C22EAD"
+
+[dependencies]
+meriyah = "6.1.4"
+astring = "1.9.0"
+
+[rust_port]
+repository = "https://github.com/ahaoboy/ytdlp-ejs"
+crate_version = "0.1.1"
+commit = "f2a266960642c3e2a15a359a7e9f43d4faa800e1"
+source_mode = "vendored"
+path = "crates/ytdlp-ejs"
+features = ["qjs"]

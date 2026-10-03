@@ -1,0 +1,83 @@
+theme = "default"
+active_provider = "Spotify"
+login_redirect_uri = "http://127.0.0.1:8989/login"
+client_id = "d420a117a32841c2b3474932e49fb54b" # gitleaks:allow - public ncspot client ID
+client_port = 8080
+tracks_playback_limit = 50
+playback_format = "{status} {track} • {artists}\n{album} • {genres}\n{metadata}"
+playback_metadata_fields = ["repeat", "shuffle", "volume", "device"]
+terminal_title = "{status} {track} · {artists} — Unified Player"
+terminal_title_idle = "{page} — Unified Player"
+notify_format = { summary = "{track} • {artists}", body = "{album}" }
+notify_timeout_in_secs = 0
+notify_transient = false
+app_refresh_duration_in_ms = 32
+playback_refresh_duration_in_ms = 0
+page_size_in_rows = 20
+enable_media_control = false
+enable_streaming = "Always"
+enable_notify = true
+enable_cover_image_cache = true
+notify_streaming_only = false
+play_icon = "▶"
+pause_icon = "▌▌"
+liked_icon = "♥"
+volume_icon = "🔊"
+genre_num = 2
+cover_img_length = 0
+cover_img_width = 5
+cover_img_pixels = 16
+seek_duration_secs = 5
+custom_queue = true
+enable_relative_line_number = false
+
+[presentation]
+# Live frame chrome: Current or Borderless; independent of metadata profile.
+layout_preset = "Current"
+# Preset: Minimal, Balanced, Detailed, or Custom.
+profile = "Custom"
+# Compact metadata: Minimal, Balanced, or Detailed. Applies immediately in the UI.
+compact_metadata = "Minimal"
+# Ordered journal state tokens: listened, listen_later, rating, note.
+journal_indicators = ["listened", "listen_later", "rating", "note"]
+focused_row_overflow = "Truncate"
+
+[lyrics]
+# External providers allowed after native lyrics. Order is fixed: SimpMusic,
+# LRCLIB, Lyrics.ovh, then Musixmatch. Lyrics.ovh is opt-in; remove entries to
+# disable their network requests.
+providers = ["simpmusic", "lrclib", "musixmatch"]
+
+[session_history]
+# Keep a bounded local record for future generated playlists and review.
+enabled = true
+max_entries = 200
+
+[listenbrainz]
+# Automatic ListenBrainz integrations are opt-in and require a restart.
+enabled = false
+artist_enrichment = true
+
+[youtube]
+auth_type = "Browser"
+# cookie_file = "/full/path/to/youtube/cookie.txt"
+# oauth_file = "/full/path/to/youtube/oauth.json"
+# po_token_file = "/full/path/to/youtube/po_token.txt"
+playback_quality = "High"
+native_audio_cache_size_mb = 16
+# Runtime for YouTube player challenge solving (restart after changing).
+javascript_runtime = "Auto"
+
+[device]
+name = "unified-player"
+device_type = "speaker"
+volume = 70
+bitrate = 320
+audio_cache = false
+normalization = false
+autoplay = false
+
+[layout]
+library = { playlist_percent = 40, album_percent = 40 }
+playback_window_position = "Top"
+playback_window_height = 6

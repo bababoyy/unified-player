@@ -1,0 +1,15 @@
+{
+  "playabilityStatus": { "status": "OK" },
+  "streamingData": {
+    "adaptiveFormats": [
+      {
+        "itag": 140,
+        "signatureCipher": "s=fixture",
+        "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+        "bitrate": 129000,
+        "contentLength": "1024",
+        "approxDurationMs": "5000"
+      }
+    ]
+  }
+}

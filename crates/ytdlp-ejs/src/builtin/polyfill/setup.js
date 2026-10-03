@@ -1,0 +1,38 @@
+// Browser environment simulation for YouTube player execution
+if (typeof globalThis.XMLHttpRequest === "undefined") {
+  globalThis.XMLHttpRequest = { prototype: {} };
+}
+if (typeof URL === "undefined") {
+  globalThis.location = {
+    hash: "",
+    host: "www.youtube.com",
+    hostname: "www.youtube.com",
+    href: "https://www.youtube.com/watch?v=yt-dlp-wins",
+    origin: "https://www.youtube.com",
+    password: "",
+    pathname: "/watch",
+    port: "",
+    protocol: "https:",
+    search: "?v=yt-dlp-wins",
+    username: "",
+  };
+} else {
+  globalThis.location = new URL("https://www.youtube.com/watch?v=yt-dlp-wins");
+}
+if (typeof globalThis.document === "undefined") {
+  globalThis.document = Object.create(null);
+}
+if (typeof globalThis.navigator === "undefined") {
+  globalThis.navigator = Object.create(null);
+}
+if (typeof globalThis.self === "undefined") {
+  globalThis.self = globalThis;
+}
+if (typeof globalThis.window === "undefined") {
+  globalThis.window = globalThis;
+}
+// TV player uses `g` as a global without declaring it (no `var g`).
+// Standard players define `g` as an IIFE parameter, but TV players don't.
+if (typeof globalThis.g === "undefined") {
+  globalThis.g = {};
+}

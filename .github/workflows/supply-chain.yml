@@ -1,0 +1,81 @@
+name: Supply Chain Policy
+
+on:
+  pull_request:
+    paths:
+      - "**/Cargo.lock"
+      - "**/Cargo.toml"
+      - ".dockerignore"
+      - "LICENSE"
+      - "**/LICENSE"
+      - "deny.toml"
+      - "scripts/check_dependencies.sh"
+      - "scripts/check_dependency_policy.py"
+      - "scripts/check_publication_surface.py"
+      - "scripts/publish"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/supply-chain.yml"
+  push:
+    branches: ["**"]
+    paths:
+      - "**/Cargo.lock"
+      - "**/Cargo.toml"
+      - ".dockerignore"
+      - "LICENSE"
+      - "**/LICENSE"
+      - "deny.toml"
+      - "scripts/check_dependencies.sh"
+      - "scripts/check_dependency_policy.py"
+      - "scripts/check_publication_surface.py"
+      - "scripts/publish"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/supply-chain.yml"
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supply-chain-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-policy:
+    # Same-repository PR commits are covered by the path-filtered push run.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-26
+        with:
+          toolchain: 1.96.1
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+
+      - name: Check advisories, licenses, bans, and sources
+        shell: bash
+        run: bash scripts/check_dependencies.sh
+
+      - name: Test publication policy
+        run: python scripts/check_publication_surface.py --self-test
+
+      - name: Check tracked and Cargo package surfaces
+        run: python scripts/check_publication_surface.py
+
+      - name: Scan full history only for a manual publication check
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          HEAD_SHA: ${{ github.sha }}
+        run: bash scripts/check_secrets.sh

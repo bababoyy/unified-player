@@ -1,0 +1,2 @@
+# No custom self-hosted labels or workflow warning suppressions are needed.
+config-variables: null

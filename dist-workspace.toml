@@ -1,0 +1,35 @@
+# Packaging rehearsal only; CI is hand-written and manual-only.
+[workspace]
+members = ["cargo:."]
+
+[dist]
+cargo-dist-version = "0.33.0"
+ci = []
+hosting = ["github"]
+installers = ["shell", "powershell"]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+default-features = false
+features = ["ci"]
+precise-builds = true
+checksum = "sha256"
+source-tarball = false
+auto-includes = false
+include = [
+    "LICENSE",
+    "README.md",
+    "docs/support-matrix.md",
+    "crates/ytdlp-ejs/THIRD_PARTY_NOTICES.md",
+]
+unix-archive = ".tar.gz"
+windows-archive = ".zip"
+
+[dist.dependencies.apt]
+pkg-config = "*"
+libssl-dev = "*"
+libasound2-dev = "*"
+libdbus-1-dev = "*"

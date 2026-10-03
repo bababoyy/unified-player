@@ -1,0 +1,2 @@
+# Bundled assets are verified byte-for-byte against the upstream manifest.
+/unified-player/src/client/youtube/ejs/*.js text eol=lf

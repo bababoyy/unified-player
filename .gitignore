@@ -1,0 +1,43 @@
+*target/
+
+**/*.rs.bk
+
+# Log files
+*log.*
+!CHANGELOG.md
+
+# Temp files
+*.tmp
+*.temp
+
+# Env file
+.env
+.envrc
+.direnv/
+
+# Cache files
+.*cache.*
+**/__pycache__/
+*.pyc
+
+# Note/draft files
+NOTES*
+
+# Generated html files for live previewing markdown
+*.html
+
+.idea
+
+*.DS_Store
+
+# Local coding-agent instructions and settings
+/AGENTS.md
+/CLAUDE.md
+/HANDOFF.md
+.agents/
+.claude/
+.opencode/
+.codex/
+
+# Browser/network captures may contain authenticated request data
+*.har

@@ -1,0 +1,8 @@
+{
+  "name": "synthetic-reverse",
+  "player": "(function(){\nfunction R(){this.v=new Map();}\nR.prototype.set=function(k,v){this.v.set(k,v);};\nR.prototype.get=function(k){return this.v.get(k);};\nR.prototype.clone=function(){return this;};\nR.prototype.transform=function(){var s=this.v.get(\"s\");if(s)this.v.set(\"s\",s.split(\"\").reverse().join(\"\"));var n=this.v.get(\"n\");if(n)this.v.set(\"n\",n.split(\"\").reverse().join(\"\"));};\nvar M={mark:function(a,b){return b;}};\nvar H=function(a,b,c){M.mark(\"alr\",\"yes\");var r=new R();if(c!==undefined)r.set(b,c);return r;};\n}).call(this);",
+  "signature_challenge": "uvwxyz",
+  "signature_expected": "zyxwvu",
+  "n_challenge": "abcdef",
+  "n_expected": "fedcba"
+}

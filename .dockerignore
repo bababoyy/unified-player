@@ -1,0 +1,27 @@
+# Keep the Docker build context source-only. Local ignored files may contain
+# browser credentials, captures, logs, or private acquisition notes.
+*
+
+!Cargo.lock
+!Cargo.toml
+!LICENSE
+!README.md
+!rust-toolchain.toml
+
+!unified-player/
+!unified-player/Cargo.toml
+!unified-player/src/
+!unified-player/src/**
+
+!crates/
+!crates/ytdlp-ejs/
+!crates/ytdlp-ejs/Cargo.toml
+!crates/ytdlp-ejs/src/
+!crates/ytdlp-ejs/src/**
+
+!lyric_finder/
+!lyric_finder/Cargo.toml
+!lyric_finder/examples/
+!lyric_finder/examples/**
+!lyric_finder/src/
+!lyric_finder/src/**

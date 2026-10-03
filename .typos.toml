@@ -1,0 +1,16 @@
+[files]
+# This excluded crate carries opaque upstream fixture strings rather than
+# prose; spelling checks on those strings produce false positives.
+extend-exclude = [
+    "crates/ytdlp-ejs/**",
+    "unified-player/src/client/youtube/ejs/**",
+]
+
+[default.extend-words]
+# Don't correct these words
+iterm = "iterm"
+Iterm = "Iterm"
+typ = "typ"
+ratatui = "ratatui"
+clen = "clen"
+WRONLY = "WRONLY"

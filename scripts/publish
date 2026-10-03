@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+cd "$(dirname -- "${BASH_SOURCE[0]}")/.."
+
+if [[ "${PUBLICATION_ENABLED:-}" != "1" ]]; then
+  echo "Publication is disabled until project identity, ownership, and release provenance are approved."
+  echo "Set PUBLICATION_ENABLED=1 only for an owner-approved rehearsal."
+  exit 1
+fi
+
+python_command="python3"
+case "$(uname -s)" in
+MINGW* | MSYS* | CYGWIN*) python_command="python" ;;
+esac
+
+publication_remote="${PUBLICATION_REMOTE:-origin}"
+publication_branch="${PUBLICATION_BRANCH:-}"
+if [[ -z "$publication_branch" ]]; then
+  echo "Publication requires an explicit PUBLICATION_BRANCH after repository identity is approved."
+  exit 1
+fi
+
+crate="${1:-unified-player}"
+case "$crate" in
+unified-player | lyric_finder) ;;
+*)
+  echo "Unsupported workspace package."
+  exit 1
+  ;;
+esac
+
+if [[ "$(git branch --show-current)" != "$publication_branch" ]]; then
+  echo "Publishing is allowed only from ${publication_branch}."
+  exit 1
+fi
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "Publishing requires a clean tracked worktree."
+  exit 1
+fi
+
+git fetch "$publication_remote" "$publication_branch"
+git merge --ff-only "${publication_remote}/${publication_branch}"
+
+bash scripts/check_dependencies.sh
+"$python_command" scripts/check_publication_surface.py --self-test
+"$python_command" scripts/check_publication_surface.py
+HEAD_SHA=HEAD bash scripts/check_secrets.sh
+
+(
+  cd "$crate"
+  cargo publish --locked --dry-run
+)
+
+read -r -p "Publish ${crate} to the configured Cargo registry? [y/N] " answer
+if [[ "$answer" != "y" && "$answer" != "Y" ]]; then
+  echo "Publication cancelled."
+  exit 0
+fi
+
+(
+  cd "$crate"
+  cargo publish --locked
+)
