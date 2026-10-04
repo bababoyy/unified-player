@@ -13,6 +13,9 @@ binary compatibility or a published release cadence.
   from the first-visit README flow.
 - Kept YouTube Music behavior explicitly experimental where it depends on
   unofficial APIs or browser-session playback.
+- Started YouTube Music tracks faster: tracks up to 32 MiB are fetched whole
+  and decoded from memory instead of one range request per MP4 fragment, and
+  the public client material a first playback needs is fetched at startup.
 
 ## Release policy
 

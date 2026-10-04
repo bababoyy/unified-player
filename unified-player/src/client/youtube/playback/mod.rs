@@ -118,7 +118,7 @@ use transport::{
     bounded_media_range_end, bounded_media_range_end_for_chunk, decoder_media_probe_outcome,
     media_probe_response_class, media_probe_target, media_range_header, media_redirect_candidates,
     media_response_length, media_url_failover_candidates, replayable_browser_headers,
-    MEDIA_RANGE_CHUNK_BYTES,
+    whole_media_ranges, MEDIA_RANGE_CHUNK_BYTES,
 };
 #[cfg(all(test, feature = "private-capture"))]
 use transport::{MediaHttpClient, RedactedMediaUrl};
