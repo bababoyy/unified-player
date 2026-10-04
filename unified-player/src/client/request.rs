@@ -43,6 +43,15 @@ pub enum PlayerRequest {
     StartPlayback(Playback, Option<bool>),
 }
 
+/// Where a Spotify [`PlayerRequest`] is sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpotifyControlRoute {
+    /// The integrated player's spirc, which needs no Web API quota. The Web API
+    /// remains the fallback when spirc cannot take the request.
+    IntegratedSpirc,
+    WebApi,
+}
+
 #[derive(Clone, Debug)]
 pub enum YouTubePlayerRequest {
     Next,

@@ -1170,15 +1170,44 @@ impl<'a> SpotifyEngineAdapter<'a> {
                     .as_ref()
                     .and_then(|playback| playback.device.id.clone())
             })
+            // The integrated player's session events are known locally, so its
+            // active role does not wait for a Web API playback read.
+            .or_else(|| player.active_integrated_device_id().map(str::to_owned))
     }
 
     pub(super) async fn targets_integrated_device(&self) -> bool {
         let active_device_id = self.active_device_id();
-        let integrated_device_id = self.client.connected_integrated_spotify_device_id().await;
+        let integrated_device_id = self
+            .client
+            .active_integrated_spotify_device_id(self.state)
+            .await;
         spotify_control_targets_integrated_device(
             active_device_id.as_deref(),
             integrated_device_id.as_deref(),
         )
+    }
+
+    pub(super) async fn control_route(&self) -> super::request::SpotifyControlRoute {
+        if self.targets_integrated_device().await {
+            super::request::SpotifyControlRoute::IntegratedSpirc
+        } else {
+            super::request::SpotifyControlRoute::WebApi
+        }
+    }
+
+    /// New playback also starts on the integrated device when no device is known to be
+    /// active, matching the integrated-first choice of device discovery.
+    pub(super) async fn start_route(&self) -> super::request::SpotifyControlRoute {
+        if self.active_device_id().is_none()
+            && self
+                .client
+                .connected_integrated_spotify_device_id()
+                .await
+                .is_some()
+        {
+            return super::request::SpotifyControlRoute::IntegratedSpirc;
+        }
+        self.control_route().await
     }
 
     #[cfg(feature = "streaming")]
@@ -1227,7 +1256,10 @@ impl<'a> SpotifyEngineAdapter<'a> {
 
     pub(super) async fn seek(&self, position: chrono::Duration) -> Result<()> {
         let active_device_id = self.active_device_id();
-        let integrated_device_id = self.client.connected_integrated_spotify_device_id().await;
+        let integrated_device_id = self
+            .client
+            .active_integrated_spotify_device_id(self.state)
+            .await;
         match spotify_seek_route(
             active_device_id.as_deref(),
             integrated_device_id.as_deref(),

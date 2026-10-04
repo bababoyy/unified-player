@@ -1165,21 +1165,18 @@ impl AppClient {
 
     /// Find an available device. If found, return the device's ID.
     pub(super) async fn find_available_device(&self) -> Result<Option<String>> {
-        let devices = self.available_devices().await?;
+        let listing = self.available_devices().await;
 
         // if there is an active device, return it
-        if let Some(d) = devices.iter().find(|d| d.is_active) {
+        if let Some(d) = listing
+            .as_ref()
+            .ok()
+            .and_then(|devices| devices.iter().find(|d| d.is_active))
+        {
             return Ok(d.id.clone());
         }
 
-        #[allow(unused_mut)]
-        let mut devices = devices
-            .into_iter()
-            .filter_map(Device::try_from_device)
-            .collect::<Vec<_>>();
-
-        #[cfg(feature = "streaming")]
-        self.ensure_integrated_device(&mut devices).await;
+        let mut devices = self.spotify_devices(listing).await?;
 
         tracing::info!(
             available_device_count = devices.len(),
@@ -1197,6 +1194,38 @@ impl AppClient {
             .unwrap_or_default();
 
         Ok(Some(devices.remove(id).id))
+    }
+
+    /// Devices that can take Spotify playback. The integrated device is known locally,
+    /// so a failed Web API listing (e.g. rate limited) does not hide it.
+    #[cfg_attr(not(feature = "streaming"), allow(clippy::unused_async))]
+    async fn spotify_devices(
+        &self,
+        listing: Result<Vec<rspotify::model::Device>>,
+    ) -> Result<Vec<Device>> {
+        #[allow(unused_mut)]
+        let mut devices: Vec<Device> = match &listing {
+            Ok(devices) => devices
+                .iter()
+                .cloned()
+                .filter_map(Device::try_from_device)
+                .collect(),
+            Err(error) => {
+                crate::observability::log_safe_error!(
+                    warn,
+                    crate::observability::DiagnosticCode::SPOTIFY_DEVICE_DISCOVERY_FAILED,
+                    crate::observability::ErrorCategory::Unavailable,
+                    error,
+                    "Spotify device listing failed; offering the integrated device only"
+                );
+                Vec::new()
+            }
+        };
+
+        #[cfg(feature = "streaming")]
+        self.ensure_integrated_device(&mut devices).await;
+
+        devices_or_listing_error(devices, listing.map(drop))
     }
 
     /// Advertise this instance's integrated device only while its streaming connection exists.
@@ -1230,17 +1259,57 @@ impl AppClient {
 
     /// Get the saved (liked) tracks of the current user
     pub async fn current_user_saved_tracks(&self) -> Result<Vec<Track>> {
-        let tracks = self
+        Ok(self.current_user_saved_tracks_with_total().await?.0)
+    }
+
+    /// The liked tracks with Spotify's item total, which also counts items
+    /// (e.g. unavailable tracks) that do not convert into a [`Track`].
+    async fn current_user_saved_tracks_with_total(&self) -> Result<(Vec<Track>, u32)> {
+        let items = self
             .all_paging_items::<rspotify::model::SavedTrack>(
                 &format!("{SPOTIFY_API_ENDPOINT}/me/tracks"),
                 0, // we don't know the total number of saved tracks beforehand
             )
             .await?;
+        let total = u32::try_from(items.len()).unwrap_or(u32::MAX);
+        Ok((items.into_iter().filter_map(liked_track).collect(), total))
+    }
 
-        Ok(tracks
+    /// The cached liked tracks, newest first, when one page shows the library is
+    /// unchanged. Saves paging through the whole library on every visit.
+    async fn cached_liked_tracks_if_current(
+        &self,
+        cached: &HashMap<String, Track>,
+    ) -> Result<Option<Vec<Track>>> {
+        let cached_total = crate::state::load_data_from_file_cache::<u32>(
+            FileCacheKey::SavedTracksTotal,
+            &config::get_config().cache_folder,
+        );
+        // Caches written before like dates and totals were kept cannot be checked.
+        let Some(cached_total) = cached_total else {
+            return Ok(None);
+        };
+        if cached.is_empty() || cached.values().any(|track| track.added_at == 0) {
+            return Ok(None);
+        }
+        // Same market as the full read, so relinked track ids compare equal.
+        let page = self
+            .http_get::<rspotify::model::Page<rspotify::model::SavedTrack>>(
+                &format!("{SPOTIFY_API_ENDPOINT}/me/tracks"),
+                &Query::from([("market", "from_token"), ("limit", "50"), ("offset", "0")]),
+            )
+            .await?;
+        let newest = page
+            .items
             .into_iter()
-            .filter_map(|t| Track::try_from_full_track(t.track))
-            .collect())
+            .filter_map(liked_track)
+            .collect::<Vec<_>>();
+        Ok(cached_liked_tracks(
+            cached,
+            cached_total,
+            page.total,
+            &newest,
+        ))
     }
 
     /// Get the recently played tracks of the current user. Without
@@ -2471,18 +2540,8 @@ impl AppClient {
                 }
             }
             ClientRequest::GetDevices => {
-                #[allow(unused_mut)]
-                let mut devices: Vec<Device> = self
-                    .available_devices()
-                    .await?
-                    .into_iter()
-                    .filter_map(Device::try_from_device)
-                    .collect();
-
-                #[cfg(feature = "streaming")]
-                self.ensure_integrated_device(&mut devices).await;
-
-                state.player.write().devices = devices;
+                let listing = self.available_devices().await;
+                state.player.write().devices = self.spotify_devices(listing).await?;
             }
             ClientRequest::GetUserPlaylists => {
                 let playlists = self.current_user_playlists().await?;
@@ -2605,18 +2664,35 @@ impl AppClient {
                                     desc: "User's recently played tracks".to_string(),
                                 },
                                 USER_LIKED_TRACKS_URI => {
-                                    let tracks = self.current_user_saved_tracks().await?;
-                                    let tracks_hm = tracks
-                                        .iter()
-                                        .map(|t| (t.id.uri(), t.clone()))
-                                        .collect::<HashMap<_, _>>();
-                                    store_data_into_file_cache(
-                                        FileCacheKey::SavedTracks,
-                                        &config::get_config().cache_folder,
-                                        &tracks_hm,
-                                    )
-                                    .context("store user's saved tracks into the cache folder")?;
-                                    state.data.write().user_data.saved_tracks = tracks_hm;
+                                    let cached = state.data.read().user_data.saved_tracks.clone();
+                                    let tracks = if let Some(tracks) =
+                                        self.cached_liked_tracks_if_current(&cached).await?
+                                    {
+                                        tracks
+                                    } else {
+                                        let (tracks, total) =
+                                            self.current_user_saved_tracks_with_total().await?;
+                                        let tracks_hm = tracks
+                                            .iter()
+                                            .map(|t| (t.id.uri(), t.clone()))
+                                            .collect::<HashMap<_, _>>();
+                                        store_data_into_file_cache(
+                                            FileCacheKey::SavedTracks,
+                                            &config::get_config().cache_folder,
+                                            &tracks_hm,
+                                        )
+                                        .context(
+                                            "store user's saved tracks into the cache folder",
+                                        )?;
+                                        store_data_into_file_cache(
+                                            FileCacheKey::SavedTracksTotal,
+                                            &config::get_config().cache_folder,
+                                            &total,
+                                        )
+                                        .context("store user's saved track total")?;
+                                        state.data.write().user_data.saved_tracks = tracks_hm;
+                                        tracks
+                                    };
                                     Context::Tracks {
                                         tracks,
                                         desc: "User's liked tracks".to_string(),
@@ -3438,6 +3514,142 @@ impl AppClient {
             _ => unreachable!("request routed to the wrong provider-read handler"),
         }
         Ok(())
+    }
+}
+
+fn liked_track(saved: rspotify::model::SavedTrack) -> Option<Track> {
+    let mut track = Track::try_from_full_track(saved.track)?;
+    track.added_at = u64::try_from(saved.added_at.timestamp()).unwrap_or_default();
+    Some(track)
+}
+
+/// `cached`, newest first, if Spotify's `total` still equals the total of the read
+/// that filled it and the newest page matches it. A like, unlike or re-like changes
+/// the total or the newest page.
+fn cached_liked_tracks(
+    cached: &HashMap<String, Track>,
+    cached_total: u32,
+    total: u32,
+    newest: &[Track],
+) -> Option<Vec<Track>> {
+    let unchanged = total == cached_total
+        && newest.iter().all(|track| {
+            cached
+                .get(&track.id.uri())
+                .is_some_and(|cached| cached.added_at == track.added_at)
+        });
+    if !unchanged {
+        return None;
+    }
+    let mut tracks = cached.values().cloned().collect::<Vec<_>>();
+    tracks.sort_by(|a, b| {
+        b.added_at
+            .cmp(&a.added_at)
+            .then_with(|| a.id.id().cmp(b.id.id()))
+    });
+    Some(tracks)
+}
+
+/// Keep the listing error only when no device is left to offer.
+fn devices_or_listing_error(devices: Vec<Device>, listing: Result<()>) -> Result<Vec<Device>> {
+    match listing {
+        Err(error) if devices.is_empty() => Err(error),
+        _ => Ok(devices),
+    }
+}
+
+#[cfg(test)]
+mod liked_tracks_cache_tests {
+    use super::cached_liked_tracks;
+    use crate::state::Track;
+    use rspotify::prelude::*;
+    use std::collections::HashMap;
+
+    fn track(id: &str, added_at: u64) -> Track {
+        Track {
+            id: rspotify::model::TrackId::from_id(id.to_owned()).unwrap(),
+            name: id.to_owned(),
+            artists: Vec::new(),
+            album: None,
+            duration: std::time::Duration::from_secs(180),
+            explicit: false,
+            added_at,
+        }
+    }
+
+    fn cache(tracks: &[Track]) -> HashMap<String, Track> {
+        tracks.iter().map(|t| (t.id.uri(), t.clone())).collect()
+    }
+
+    const OLD: &str = "0000000000000000000001";
+    const NEW: &str = "0000000000000000000002";
+    const OTHER: &str = "0000000000000000000003";
+
+    #[test]
+    fn unchanged_library_is_served_newest_first_from_the_cache() {
+        let cached = cache(&[track(OLD, 10), track(NEW, 20)]);
+        let tracks = cached_liked_tracks(&cached, 2, 2, &[track(NEW, 20), track(OLD, 10)]).unwrap();
+        let ids = tracks
+            .iter()
+            .map(|t| t.id.id().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, [NEW, OLD]);
+    }
+
+    #[test]
+    fn a_new_like_or_unlike_needs_a_full_refresh() {
+        let cached = cache(&[track(OLD, 10), track(NEW, 20)]);
+        // A newly liked track is on the newest page but not cached.
+        assert!(cached_liked_tracks(&cached, 2, 2, &[track(OTHER, 30), track(NEW, 20)]).is_none());
+        // An unliked track changes the total.
+        assert!(cached_liked_tracks(&cached, 2, 1, &[track(NEW, 20)]).is_none());
+    }
+
+    #[test]
+    fn items_that_do_not_convert_still_match_the_stored_total() {
+        // Spotify counts an unavailable liked track that the cache cannot hold.
+        let cached = cache(&[track(OLD, 10), track(NEW, 20)]);
+        assert!(cached_liked_tracks(&cached, 3, 3, &[track(NEW, 20), track(OLD, 10)]).is_some());
+    }
+
+    #[test]
+    fn a_re_like_moves_the_date_and_needs_a_full_refresh() {
+        let cached = cache(&[track(OLD, 10), track(NEW, 20)]);
+        assert!(cached_liked_tracks(&cached, 2, 2, &[track(OLD, 30), track(NEW, 20)]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod device_listing_tests {
+    use super::devices_or_listing_error;
+    use crate::state::Device;
+
+    fn integrated() -> Device {
+        Device {
+            id: "integrated".to_owned(),
+            name: "unified-player".to_owned(),
+            is_integrated: true,
+        }
+    }
+
+    #[test]
+    fn failed_listing_still_offers_the_integrated_device() {
+        let devices =
+            devices_or_listing_error(vec![integrated()], Err(anyhow::anyhow!("429"))).unwrap();
+        assert_eq!(devices.len(), 1);
+        assert!(devices[0].is_integrated);
+    }
+
+    #[test]
+    fn failed_listing_without_devices_reports_the_error() {
+        assert!(devices_or_listing_error(Vec::new(), Err(anyhow::anyhow!("429"))).is_err());
+    }
+
+    #[test]
+    fn successful_empty_listing_is_not_an_error() {
+        assert!(devices_or_listing_error(Vec::new(), Ok(()))
+            .unwrap()
+            .is_empty());
     }
 }
 

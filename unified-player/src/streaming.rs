@@ -22,7 +22,7 @@ use librespot_playback::{
 use librespot_playback::{convert::Converter, decoder::AudioPacket};
 use rspotify::model::{EpisodeId, Id, PlayableId, TrackId};
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 #[cfg(feature = "rodio-backend")]
@@ -34,6 +34,10 @@ mod rodio_output;
 /// reconnecting mid-session (e.g. via `RestartIntegratedClient`) does not
 /// pause an intentionally playing track.
 static IS_FIRST_CONNECTION: AtomicBool = AtomicBool::new(true);
+
+/// Identifies streaming connections so session events of a replaced
+/// connection cannot change the active state of its successor.
+static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(not(any(
     feature = "rodio-backend",
@@ -321,6 +325,8 @@ pub async fn new_connection(
     let pause_on_startup =
         configs.app_config.pause_on_startup && IS_FIRST_CONNECTION.swap(false, Ordering::SeqCst);
     let spotify_queue_completion = client.register_spotify_queue_completion_slot();
+    let connection_id = NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
+    let connection_state = state.clone();
 
     let player_event_task = tokio::task::spawn({
         let mut channel = player.get_player_event_channel();
@@ -333,6 +339,34 @@ pub async fn new_connection(
                     state = librespot_event_kind(&event),
                     "Received a librespot player event"
                 );
+                match &event {
+                    player::PlayerEvent::SessionConnected { .. } => state
+                        .player
+                        .write()
+                        .apply_integrated_session_event(connection_id, true),
+                    player::PlayerEvent::SessionDisconnected { .. } => state
+                        .player
+                        .write()
+                        .apply_integrated_session_event(connection_id, false),
+                    player::PlayerEvent::Seeked {
+                        track_id,
+                        position_ms,
+                        ..
+                    }
+                    | player::PlayerEvent::PositionCorrection {
+                        track_id,
+                        position_ms,
+                        ..
+                    } => {
+                        if let Ok(uri) = track_id.to_uri() {
+                            state
+                                .player
+                                .write()
+                                .apply_integrated_position(&uri, *position_ms);
+                        }
+                    }
+                    _ => {}
+                }
                 // Suppress Spotify's auto-resume of the previous session on
                 // startup. The `librespot` connect transfer finalizes the
                 // play state asynchronously, so a single reactive pause is not
@@ -436,6 +470,30 @@ pub async fn new_connection(
                         if should_reconcile {
                             client.update_playback(&state);
                         }
+                        // This player's own metadata shows the new track; the
+                        // scheduled Web API read stays only as the fallback.
+                        if let PlayerEvent::Changed { ref playable_id } = event {
+                            if should_reconcile
+                                && state.player.read().active_integrated_device_id().is_some()
+                            {
+                                let client = client.clone();
+                                let state = state.clone();
+                                let id = playable_id.clone();
+                                tokio::task::spawn(async move {
+                                    if let Err(err) =
+                                        client.project_integrated_track_change(&state, id).await
+                                    {
+                                        crate::observability::log_safe_error!(
+                                            debug,
+                                            crate::observability::DiagnosticCode::SPOTIFY_PLAYBACK_REFRESH_FAILED,
+                                            crate::observability::ErrorCategory::Unavailable,
+                                            &err,
+                                            "Integrated track metadata unavailable; using the Web API read"
+                                        );
+                                    }
+                                });
+                            }
+                        }
 
                         // execute a player event hook command
                         if let Some(ref cmd) = configs.app_config.player_event_hook_command {
@@ -468,6 +526,11 @@ pub async fn new_connection(
             () = spirc_task => {},
             _ = player_event_task => {}
         }
+        // A connection that ends without a disconnect event can no longer take commands.
+        connection_state
+            .player
+            .write()
+            .apply_integrated_session_event(connection_id, false);
     });
 
     tracing::info!("New streaming connection has been established!");

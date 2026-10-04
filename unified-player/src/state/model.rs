@@ -1820,8 +1820,14 @@ pub struct Track {
     pub album: Option<Album>,
     pub duration: std::time::Duration,
     pub explicit: bool,
-    #[serde(skip)]
+    /// Unix seconds when the track was added to its playlist or liked; 0 when unknown.
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub added_at: u64,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]

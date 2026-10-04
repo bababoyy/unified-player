@@ -28,6 +28,8 @@ pub enum FileCacheKey {
     SavedShows,
     SavedAlbums,
     SavedTracks,
+    /// Spotify's liked-track total at the last full read of `SavedTracks`.
+    SavedTracksTotal,
 }
 
 /// default time-to-live cache duration

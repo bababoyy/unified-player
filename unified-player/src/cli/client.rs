@@ -568,11 +568,18 @@ async fn handle_playback_request(
             let client = client.clone();
             let state = state.clone();
             async move {
-                match client.handle_player_request(player_request, playback).await {
+                let route = client.spotify_control_route(&state, &player_request).await;
+                let starts_playback = matches!(player_request, PlayerRequest::StartPlayback(..));
+                match client
+                    .handle_player_request(player_request, playback, route)
+                    .await
+                {
                     Ok(playback) => {
                         // update application's states
                         state.player.write().buffered_playback = playback;
-                        client.update_playback(&state);
+                        client
+                            .refresh_after_spotify_control(&state, starts_playback)
+                            .await;
                     }
                     Err(err) => {
                         crate::observability::log_safe_error!(
@@ -587,9 +594,14 @@ async fn handle_playback_request(
             }
         });
     } else {
-        // Handles the player request synchronously
+        // Handles the player request synchronously. Without a running application
+        // there is no integrated device to route to.
         client
-            .handle_player_request(player_request, playback)
+            .handle_player_request(
+                player_request,
+                playback,
+                crate::client::SpotifyControlRoute::WebApi,
+            )
             .await?;
     }
     Ok(())

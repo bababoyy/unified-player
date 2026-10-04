@@ -1078,20 +1078,98 @@ impl AppClient {
         .await
     }
 
+    /// Refresh Spotify playback after a player request.
+    pub(crate) async fn refresh_after_spotify_control(
+        &self,
+        state: &SharedState,
+        starts_playback: bool,
+    ) {
+        if starts_playback {
+            self.read_spotify_playback_after_start(state);
+        } else {
+            self.reconcile_spotify_control(state).await;
+        }
+    }
+
+    /// Refresh Spotify playback after a control. The integrated player's events
+    /// already carry the new state, so a Web API read would only spend quota.
+    async fn reconcile_spotify_control(&self, state: &SharedState) {
+        let spotify = playback_coordinator::SpotifyEngineAdapter::new(self, state);
+        if !spotify.targets_integrated_device().await {
+            self.update_playback(state);
+        }
+    }
+
+    /// Choose where a Spotify player request is sent from the current device state.
+    pub(crate) async fn spotify_control_route(
+        &self,
+        state: &SharedState,
+        request: &PlayerRequest,
+    ) -> request::SpotifyControlRoute {
+        let spotify = playback_coordinator::SpotifyEngineAdapter::new(self, state);
+        if matches!(request, PlayerRequest::StartPlayback(..)) {
+            spotify.start_route().await
+        } else {
+            spotify.control_route().await
+        }
+    }
+
     /// Handle a player request, return a new playback metadata on success
     pub async fn handle_player_request(
         &self,
         request: PlayerRequest,
         mut playback: Option<PlaybackMetadata>,
+        route: request::SpotifyControlRoute,
     ) -> Result<Option<PlaybackMetadata>> {
+        #[cfg(feature = "streaming")]
+        if route == request::SpotifyControlRoute::IntegratedSpirc {
+            if let Some(command) = integrated_player_command(&request, playback.as_ref()) {
+                match self.control_integrated_player(command) {
+                    Some(Ok(())) => {
+                        tracing::debug!(
+                            route = "integrated_spirc",
+                            "Routed a Spotify player request to the integrated device"
+                        );
+                        if matches!(request, PlayerRequest::StartPlayback(..)) {
+                            return Ok(None);
+                        }
+                        if let Some(playback) = playback.as_mut() {
+                            project_player_request(playback, &request);
+                        }
+                        return Ok(playback);
+                    }
+                    Some(Err(error)) => crate::observability::log_safe_error!(
+                        warn,
+                        crate::observability::DiagnosticCode::REQUEST_HANDLE_FAILED,
+                        crate::observability::ErrorCategory::Unavailable,
+                        &error,
+                        "Integrated Spotify control failed; falling back to the Web API"
+                    ),
+                    None => {}
+                }
+            }
+        }
+        #[cfg(not(feature = "streaming"))]
+        let _ = route;
+
         // handle requests that don't require an active playback
         match request {
             PlayerRequest::TransferPlayback(device_id, force_play) => {
                 // `TransferPlayback` needs to be handled separately from other player requests
                 // because `TransferPlayback` doesn't require an active playback
-                self.spotify_api()
+                if let Err(error) = self
+                    .spotify_api()
                     .transfer_playback(&device_id, Some(force_play))
-                    .await?;
+                    .await
+                {
+                    if !self.transfer_to_integrated_player(&device_id).await {
+                        return Err(error.into());
+                    }
+                    tracing::warn!(
+                        route = "integrated_spirc",
+                        "Web API transfer failed; transferred through the integrated device"
+                    );
+                }
                 tracing::info!("Transferred Spotify playback to the selected device");
                 return Ok(None);
             }
@@ -1147,11 +1225,7 @@ impl AppClient {
                     .await?;
             }
             PlayerRequest::Repeat => {
-                let next_repeat_state = match playback.repeat_state {
-                    rspotify::model::RepeatState::Off => rspotify::model::RepeatState::Track,
-                    rspotify::model::RepeatState::Track => rspotify::model::RepeatState::Context,
-                    rspotify::model::RepeatState::Context => rspotify::model::RepeatState::Off,
-                };
+                let next_repeat_state = next_repeat_state(playback.repeat_state);
 
                 self.spotify_api()
                     .repeat(next_repeat_state, device_id)
@@ -1196,6 +1270,191 @@ impl AppClient {
         }
 
         Ok(Some(playback))
+    }
+
+    /// Send a command to the integrated player; `None` without a streaming connection.
+    #[cfg(feature = "streaming")]
+    fn control_integrated_player(&self, command: IntegratedPlayerCommand) -> Option<Result<()>> {
+        let connection = self.stream_conn.lock();
+        let connection = connection.as_ref()?;
+        let result = match command {
+            IntegratedPlayerCommand::Next => connection.next(),
+            IntegratedPlayerCommand::Previous => connection.prev(),
+            IntegratedPlayerCommand::Play => connection.play(),
+            IntegratedPlayerCommand::Pause => connection.pause(),
+            IntegratedPlayerCommand::PlayPause => connection.play_pause(),
+            IntegratedPlayerCommand::Seek(position_ms) => connection.set_position_ms(position_ms),
+            IntegratedPlayerCommand::Shuffle(shuffle) => connection.shuffle(shuffle),
+            IntegratedPlayerCommand::Repeat { context, track } => connection
+                .repeat(context)
+                .and_then(|()| connection.repeat_track(track)),
+            IntegratedPlayerCommand::Volume(volume) => connection.set_volume(volume),
+            // Activation lets an inactive integrated device take the new playback,
+            // as a Web API start on that device would.
+            IntegratedPlayerCommand::Load(request) => connection
+                .activate()
+                .and_then(|()| connection.load(*request)),
+        };
+        Some(result.map_err(anyhow::Error::from))
+    }
+
+    /// Pull the active playback onto the integrated device through Spotify Connect.
+    /// Returns whether `device_id` is the integrated device and the transfer was sent.
+    #[cfg(feature = "streaming")]
+    async fn transfer_to_integrated_player(&self, device_id: &str) -> bool {
+        if self
+            .connected_integrated_spotify_device_id()
+            .await
+            .as_deref()
+            != Some(device_id)
+        {
+            return false;
+        }
+        self.stream_conn
+            .lock()
+            .as_ref()
+            .is_some_and(|connection| connection.transfer(None).is_ok())
+    }
+
+    #[cfg(not(feature = "streaming"))]
+    #[allow(clippy::unused_async)]
+    async fn transfer_to_integrated_player(&self, _device_id: &str) -> bool {
+        false
+    }
+}
+
+const fn next_repeat_state(state: rspotify::model::RepeatState) -> rspotify::model::RepeatState {
+    match state {
+        rspotify::model::RepeatState::Off => rspotify::model::RepeatState::Track,
+        rspotify::model::RepeatState::Track => rspotify::model::RepeatState::Context,
+        rspotify::model::RepeatState::Context => rspotify::model::RepeatState::Off,
+    }
+}
+
+/// A [`PlayerRequest`] translated for the integrated player's spirc.
+#[cfg(feature = "streaming")]
+#[derive(Debug)]
+enum IntegratedPlayerCommand {
+    Next,
+    Previous,
+    Play,
+    Pause,
+    PlayPause,
+    Seek(u32),
+    Shuffle(bool),
+    Repeat { context: bool, track: bool },
+    Volume(u16),
+    Load(Box<librespot_connect::LoadRequest>),
+}
+
+/// Translate `request` for spirc, or `None` when it needs the Web API: a transfer,
+/// or a toggle whose current state is unknown.
+#[cfg(feature = "streaming")]
+fn integrated_player_command(
+    request: &PlayerRequest,
+    playback: Option<&PlaybackMetadata>,
+) -> Option<IntegratedPlayerCommand> {
+    Some(match request {
+        PlayerRequest::NextTrack => IntegratedPlayerCommand::Next,
+        PlayerRequest::PreviousTrack => IntegratedPlayerCommand::Previous,
+        PlayerRequest::Resume => IntegratedPlayerCommand::Play,
+        PlayerRequest::Pause => IntegratedPlayerCommand::Pause,
+        PlayerRequest::ResumePause => IntegratedPlayerCommand::PlayPause,
+        PlayerRequest::SeekTrack(position) => {
+            IntegratedPlayerCommand::Seek(u32::try_from(position.num_milliseconds()).ok()?)
+        }
+        PlayerRequest::Shuffle => IntegratedPlayerCommand::Shuffle(!playback?.shuffle_state),
+        PlayerRequest::Repeat => match next_repeat_state(playback?.repeat_state) {
+            rspotify::model::RepeatState::Off => IntegratedPlayerCommand::Repeat {
+                context: false,
+                track: false,
+            },
+            rspotify::model::RepeatState::Context => IntegratedPlayerCommand::Repeat {
+                context: true,
+                track: false,
+            },
+            rspotify::model::RepeatState::Track => IntegratedPlayerCommand::Repeat {
+                context: true,
+                track: true,
+            },
+        },
+        PlayerRequest::Volume(percent) => {
+            IntegratedPlayerCommand::Volume(percent_to_librespot_volume(u32::from(*percent)))
+        }
+        PlayerRequest::ToggleMute => IntegratedPlayerCommand::Volume(
+            playback?.mute_state.map_or(0, percent_to_librespot_volume),
+        ),
+        PlayerRequest::StartPlayback(start, shuffle) => {
+            let shuffle = shuffle.or_else(|| playback.map(|playback| playback.shuffle_state));
+            IntegratedPlayerCommand::Load(Box::new(integrated_load_request(start, shuffle)?))
+        }
+        PlayerRequest::TransferPlayback(..) => return None,
+    })
+}
+
+#[cfg(feature = "streaming")]
+fn percent_to_librespot_volume(percent: u32) -> u16 {
+    u16::try_from(percent.min(100) * u32::from(u16::MAX) / 100).unwrap_or(u16::MAX)
+}
+
+#[cfg(feature = "streaming")]
+fn integrated_load_request(
+    start: &Playback,
+    shuffle: Option<bool>,
+) -> Option<librespot_connect::LoadRequest> {
+    use librespot_connect::{LoadContextOptions, LoadRequest, LoadRequestOptions, PlayingTrack};
+
+    let options = |offset: &Option<rspotify::model::Offset>| LoadRequestOptions {
+        start_playing: true,
+        playing_track: offset.as_ref().and_then(|offset| match offset {
+            rspotify::model::Offset::Uri(uri) => Some(PlayingTrack::Uri(uri.clone())),
+            // rspotify carries a context index in this `Duration`.
+            rspotify::model::Offset::Position(index) => u32::try_from(index.num_milliseconds())
+                .ok()
+                .map(PlayingTrack::Index),
+        }),
+        context_options: shuffle.map(|shuffle| {
+            LoadContextOptions::Options(librespot_connect::Options {
+                shuffle,
+                ..Default::default()
+            })
+        }),
+        ..Default::default()
+    };
+    Some(match start {
+        // Liked tracks are an app-side context without a Spotify context URI.
+        Playback::Context(ContextId::Tracks(_), _) => return None,
+        Playback::Context(id, offset) => LoadRequest::from_context_uri(id.uri(), options(offset)),
+        Playback::URIs(ids, offset) => {
+            LoadRequest::from_tracks(ids.iter().map(|id| id.uri()).collect(), options(offset))
+        }
+    })
+}
+
+/// Mirror a request the integrated player accepted onto the cached playback metadata.
+#[cfg(feature = "streaming")]
+fn project_player_request(playback: &mut PlaybackMetadata, request: &PlayerRequest) {
+    match request {
+        PlayerRequest::Resume => playback.is_playing = true,
+        PlayerRequest::Pause => playback.is_playing = false,
+        PlayerRequest::ResumePause => playback.is_playing = !playback.is_playing,
+        PlayerRequest::Shuffle => playback.shuffle_state = !playback.shuffle_state,
+        PlayerRequest::Repeat => playback.repeat_state = next_repeat_state(playback.repeat_state),
+        PlayerRequest::Volume(volume) => {
+            playback.volume = Some(u32::from(*volume));
+            playback.mute_state = None;
+        }
+        PlayerRequest::ToggleMute => {
+            playback.mute_state = match playback.mute_state {
+                None => Some(playback.volume.unwrap_or_default()),
+                Some(_) => None,
+            };
+        }
+        PlayerRequest::NextTrack
+        | PlayerRequest::PreviousTrack
+        | PlayerRequest::SeekTrack(_)
+        | PlayerRequest::TransferPlayback(..)
+        | PlayerRequest::StartPlayback(..) => {}
     }
 }
 
@@ -1853,7 +2112,7 @@ impl AppClient {
                 match outcome {
                     playback_coordinator::ActivePlaybackControlOutcome::Applied(provider) => {
                         if provider == config::ActiveProvider::Spotify {
-                            self.update_playback(state);
+                            self.reconcile_spotify_control(state).await;
                         }
                         Ok(RequestDisposition::Applied)
                     }
@@ -1918,7 +2177,7 @@ impl AppClient {
                         }
                         state.player.write().apply_spotify_seek(position);
                         self.refresh_and_persist_session(state, config::ActiveProvider::Spotify);
-                        self.update_playback(state);
+                        self.reconcile_spotify_control(state).await;
                     }
                     config::ActiveProvider::YouTubeMusic => {
                         let local = tokio::select! {
@@ -2023,7 +2282,7 @@ impl AppClient {
                     if !changed {
                         return Ok(RequestDisposition::NoOp);
                     }
-                    self.update_playback(state);
+                    self.reconcile_spotify_control(state).await;
                     return Ok(RequestDisposition::Applied);
                 }
                 let starts_playback = matches!(&request, PlayerRequest::StartPlayback(..));
@@ -2078,9 +2337,10 @@ impl AppClient {
                             &youtube,
                             &sessions,
                             |_cancellation| async {
+                                let route = self.spotify_control_route(state, &request).await;
                                 let playback = state.player.read().buffered_playback.clone();
                                 let playback =
-                                    self.handle_player_request(request, playback).await?;
+                                    self.handle_player_request(request, playback, route).await?;
                                 let mut player = state.player.write();
                                 player.buffered_playback = playback;
                                 if starts_native_context {
@@ -2100,14 +2360,16 @@ impl AppClient {
                     self.playback
                         .refresh_and_persist(&sessions, config::ActiveProvider::Spotify);
                 } else {
+                    let route = self.spotify_control_route(state, &request).await;
                     let playback = state.player.read().buffered_playback.clone();
-                    let playback = self.handle_player_request(request, playback).await?;
+                    let playback = self.handle_player_request(request, playback, route).await?;
                     state.player.write().buffered_playback = playback;
                     let sessions = playback_coordinator::AppPlaybackSessions::new(state);
                     self.playback
                         .refresh_and_persist(&sessions, config::ActiveProvider::Spotify);
                 }
-                self.update_playback(state);
+                self.refresh_after_spotify_control(state, starts_playback)
+                    .await;
                 Ok(RequestDisposition::Applied)
             }
             ClientRequest::GetCurrentPlayback => {
@@ -2431,5 +2693,126 @@ impl AppClient {
             }
             _ => unreachable!("request routed to the wrong playback handler"),
         }
+    }
+}
+
+#[cfg(all(test, feature = "streaming"))]
+mod integrated_player_command_tests {
+    use super::{
+        integrated_player_command, percent_to_librespot_volume, project_player_request,
+        IntegratedPlayerCommand,
+    };
+    use crate::client::PlayerRequest;
+    use crate::state::{ContextId, Playback, PlaybackMetadata};
+    use rspotify::model::{PlaylistId, RepeatState};
+
+    fn playback(repeat_state: RepeatState, mute_state: Option<u32>) -> PlaybackMetadata {
+        PlaybackMetadata {
+            device_name: "unified-player".to_owned(),
+            device_id: Some("integrated".to_owned()),
+            volume: Some(60),
+            is_playing: true,
+            repeat_state,
+            shuffle_state: false,
+            mute_state,
+        }
+    }
+
+    fn repeat_flags(state: RepeatState) -> (bool, bool) {
+        let playback = playback(state, None);
+        match integrated_player_command(&PlayerRequest::Repeat, Some(&playback)) {
+            Some(IntegratedPlayerCommand::Repeat { context, track }) => (context, track),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn repeat_follows_the_web_api_cycle() {
+        assert_eq!(repeat_flags(RepeatState::Off), (true, true));
+        assert_eq!(repeat_flags(RepeatState::Track), (true, false));
+        assert_eq!(repeat_flags(RepeatState::Context), (false, false));
+    }
+
+    #[test]
+    fn toggles_without_known_state_fall_back_to_the_web_api() {
+        for request in [
+            PlayerRequest::Shuffle,
+            PlayerRequest::Repeat,
+            PlayerRequest::ToggleMute,
+        ] {
+            assert!(integrated_player_command(&request, None).is_none());
+        }
+        assert!(matches!(
+            integrated_player_command(&PlayerRequest::NextTrack, None),
+            Some(IntegratedPlayerCommand::Next)
+        ));
+    }
+
+    #[test]
+    fn transfer_is_left_to_the_web_api() {
+        let request = PlayerRequest::TransferPlayback("phone".to_owned(), true);
+        assert!(integrated_player_command(&request, None).is_none());
+    }
+
+    #[test]
+    fn mute_toggles_between_silence_and_the_saved_volume() {
+        let unmuted = playback(RepeatState::Off, None);
+        assert!(matches!(
+            integrated_player_command(&PlayerRequest::ToggleMute, Some(&unmuted)),
+            Some(IntegratedPlayerCommand::Volume(0))
+        ));
+        let muted = playback(RepeatState::Off, Some(100));
+        assert!(matches!(
+            integrated_player_command(&PlayerRequest::ToggleMute, Some(&muted)),
+            Some(IntegratedPlayerCommand::Volume(u16::MAX))
+        ));
+    }
+
+    #[test]
+    fn volume_percent_maps_onto_the_librespot_range() {
+        assert_eq!(percent_to_librespot_volume(0), 0);
+        assert_eq!(percent_to_librespot_volume(100), u16::MAX);
+        assert_eq!(percent_to_librespot_volume(150), u16::MAX);
+    }
+
+    #[test]
+    fn start_playback_loads_spotify_contexts_but_not_liked_tracks() {
+        let playlist = PlaylistId::from_id("37i9dQZF1DXcBWIGoYBM5M").unwrap();
+        let request = PlayerRequest::StartPlayback(
+            Playback::Context(ContextId::Playlist(playlist), None),
+            Some(true),
+        );
+        let Some(IntegratedPlayerCommand::Load(load)) = integrated_player_command(&request, None)
+        else {
+            panic!("expected a load command");
+        };
+        let load = format!("{load:?}");
+        assert!(load.contains("spotify:playlist:37i9dQZF1DXcBWIGoYBM5M"));
+        assert!(load.contains("shuffle: true"));
+
+        let liked = PlayerRequest::StartPlayback(
+            Playback::Context(
+                ContextId::Tracks(crate::state::TracksId::new(
+                    "tracks:user-liked-tracks",
+                    "Liked Tracks",
+                )),
+                None,
+            ),
+            None,
+        );
+        assert!(integrated_player_command(&liked, None).is_none());
+    }
+
+    #[test]
+    fn accepted_requests_update_the_cached_playback() {
+        let mut state = playback(RepeatState::Off, None);
+        project_player_request(&mut state, &PlayerRequest::Repeat);
+        assert_eq!(state.repeat_state, RepeatState::Track);
+        project_player_request(&mut state, &PlayerRequest::ToggleMute);
+        assert_eq!(state.mute_state, Some(60));
+        project_player_request(&mut state, &PlayerRequest::Volume(30));
+        assert_eq!((state.volume, state.mute_state), (Some(30), None));
+        project_player_request(&mut state, &PlayerRequest::ResumePause);
+        assert!(!state.is_playing);
     }
 }
