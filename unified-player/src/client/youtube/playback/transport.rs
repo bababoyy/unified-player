@@ -945,6 +945,68 @@ impl MediaHttpClient {
         }
         self
     }
+
+    /// Fetch a whole media file of `length` bytes as parallel bounded ranges.
+    pub(super) async fn fetch_whole(
+        &self,
+        url: &Url,
+        length: u64,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<u8>, MediaHttpError> {
+        const PARALLEL_RANGES: usize = 4;
+
+        let fetch_range = |(start, end): (u64, u64)| async move {
+            let response = self
+                .client
+                .get(url.clone())
+                .headers(self.default_headers.clone())
+                .header(header::RANGE, media_range_header(start, end))
+                .send()
+                .await
+                .map_err(|_| MediaHttpError("media range request failed".to_string()))?;
+            if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+                return Err(MediaHttpError(format!(
+                    "media range returned status {}",
+                    response.status().as_u16()
+                )));
+            }
+            let body = response
+                .bytes()
+                .await
+                .map_err(|_| MediaHttpError("media range read failed".to_string()))?;
+            if body.len() as u64 != end - start + 1 {
+                return Err(MediaHttpError("media range was truncated".to_string()));
+            }
+            Ok(body)
+        };
+        let parts = futures::stream::iter(whole_media_ranges(length, self.range_chunk_bytes))
+            .map(fetch_range)
+            .buffered(PARALLEL_RANGES)
+            .collect::<Vec<_>>();
+        let parts = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                return Err(MediaHttpError("media fetch was cancelled".to_string()));
+            }
+            parts = parts => parts,
+        };
+        let mut media = Vec::with_capacity(usize::try_from(length).unwrap_or_default());
+        for part in parts {
+            media.extend_from_slice(&part?);
+        }
+        Ok(media)
+    }
+}
+
+/// Inclusive byte ranges of at most `chunk_bytes` covering `length` bytes.
+pub(super) fn whole_media_ranges(length: u64, chunk_bytes: u64) -> Vec<(u64, u64)> {
+    let chunk_bytes = chunk_bytes.max(1);
+    (0..length.div_ceil(chunk_bytes))
+        .map(|index| {
+            let start = index * chunk_bytes;
+            (start, (start + chunk_bytes).min(length) - 1)
+        })
+        .collect()
 }
 
 pub(super) fn shared_media_http_client() -> reqwest::Client {

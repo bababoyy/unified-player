@@ -20,6 +20,9 @@ use super::{
     transport::{MediaHttpClient, RedactedMediaUrl},
 };
 
+/// Largest media file fetched whole before decoding; about 30 minutes of 128 kbps audio.
+const MAX_IN_MEMORY_MEDIA_BYTES: u64 = 32 * 1024 * 1024;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum YouTubeProbeDecoderChunkSize {
     OneMib,
@@ -149,6 +152,43 @@ pub(crate) async fn open_decoded_source_with_capture(
     ))
 }
 
+async fn open_in_memory_source(
+    source: &ResolvedAudioSource,
+    length: u64,
+    position: Duration,
+    cancellation: &CancellationToken,
+) -> anyhow::Result<Box<dyn rodio::Source<Item = f32> + Send>> {
+    let media = MediaHttpClient::new(
+        source.required_headers.clone(),
+        #[cfg(feature = "private-capture")]
+        None,
+    )?
+    .fetch_whole(&source.url, length, cancellation)
+    .await
+    .map_err(|error| anyhow::anyhow!("fetch whole YouTube media: {error}"))?;
+    let mime_type = source.mime_type.clone();
+    let cancellation = cancellation.clone();
+    tokio::task::spawn_blocking(move || {
+        use rodio::Source as _;
+
+        let mut decoder =
+            build_native_decoder(std::io::Cursor::new(media), &mime_type, Some(length))
+                .context("decode native YouTube audio")?;
+        if !position.is_zero() {
+            decoder
+                .try_seek(position)
+                .map_err(|_| anyhow::anyhow!("seek native YouTube audio"))?;
+        }
+        anyhow::ensure!(
+            !cancellation.is_cancelled(),
+            "native YouTube decoder initialization was cancelled"
+        );
+        Ok::<Box<dyn rodio::Source<Item = f32> + Send>, anyhow::Error>(Box::new(decoder))
+    })
+    .await
+    .context("join native YouTube decoder initialization")?
+}
+
 async fn open_decoded_source_inner(
     source: &ResolvedAudioSource,
     position: Duration,
@@ -159,6 +199,31 @@ async fn open_decoded_source_inner(
     #[cfg(feature = "private-capture")] evidence: Option<MediaPrivateEvidence>,
 ) -> anyhow::Result<Box<dyn rodio::Source<Item = f32> + Send>> {
     use stream_download::{http::HttpStream, source::SourceStream as _, Settings, StreamDownload};
+
+    // Probing fragmented MP4 seeks to every fragment header across the whole
+    // file, and on a ranged stream each seek is a new request (~2-3 s per
+    // track). A small file is cheaper to fetch whole and decode from memory.
+    // Probe and capture runs keep the streamed path they record.
+    #[cfg(feature = "private-capture")]
+    let recorded = probe_recorder.is_some() || evidence.is_some();
+    #[cfg(not(feature = "private-capture"))]
+    let recorded = probe_recorder.is_some();
+    if let Some(length) = source
+        .content_length
+        .filter(|length| !recorded && (1..=MAX_IN_MEMORY_MEDIA_BYTES).contains(length))
+    {
+        match open_in_memory_source(source, length, position, &cancellation).await {
+            Ok(decoded) => return Ok(decoded),
+            Err(error) if cancellation.is_cancelled() => return Err(error),
+            Err(error) => crate::observability::log_safe_error!(
+                debug,
+                crate::observability::DiagnosticCode::YOUTUBE_PLAYBACK_VALIDATION_FAILED,
+                crate::observability::ErrorCategory::Network,
+                &error,
+                "Whole YouTube media fetch failed; streaming it instead"
+            ),
+        }
+    }
 
     #[cfg(feature = "private-capture")]
     let transport_started = std::time::Instant::now();

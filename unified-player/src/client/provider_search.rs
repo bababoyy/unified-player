@@ -15,6 +15,13 @@ use crate::{
 use super::{youtube, AppClient};
 
 impl AppClient {
+    /// Fetch the session material a first `YouTube` Music playback needs.
+    pub(crate) async fn warm_up_youtube_session(&self) {
+        self.youtube_audio_resolver
+            .warm_up_session(&tokio_util::sync::CancellationToken::new())
+            .await;
+    }
+
     fn schedule_youtube_playback_warmup(&self) {
         let resolver = self.youtube_audio_resolver.clone();
         tokio::spawn(async move {

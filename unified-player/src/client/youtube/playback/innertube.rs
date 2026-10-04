@@ -389,9 +389,11 @@ impl InnertubeAudioResolver {
         load_request_auth(self.auth_type, &self.cookie_path, &self.oauth_path, None).await
     }
 
+    /// Guest visitor data from the watch page of `video_id`, or from the home
+    /// page when warming up before any video is known.
     async fn guest_visitor_data(
         &self,
-        video_id: &str,
+        video_id: Option<&str>,
         cancellation: &CancellationToken,
     ) -> Result<Option<String>, AudioSourceError> {
         if let Some(visitor_data) = self.guest_visitor_data.get() {
@@ -405,8 +407,10 @@ impl InnertubeAudioResolver {
         }
 
         let mut page_url = Url::parse(WEB_PAGE).expect("static YouTube page URL is valid");
-        page_url.set_path("watch");
-        page_url.query_pairs_mut().append_pair("v", video_id);
+        if let Some(video_id) = video_id {
+            page_url.set_path("watch");
+            page_url.query_pairs_mut().append_pair("v", video_id);
+        }
         let response = tokio::select! {
             biased;
             () = cancellation.cancelled() => {
@@ -732,7 +736,7 @@ impl InnertubeAudioResolver {
             PlayerClientKind::AndroidVr | PlayerClientKind::VisionOs
         ) && auth_scope == super::format::PlayerAttemptAuthScope::Public
         {
-            match self.guest_visitor_data(video_id, cancellation).await {
+            match self.guest_visitor_data(Some(video_id), cancellation).await {
                 Ok(visitor_data) => visitor_data,
                 Err(error) => {
                     let outcome = if error.kind == AudioSourceErrorKind::Cancelled {
@@ -2098,6 +2102,15 @@ impl InnertubeAudioResolver {
 impl AudioSourceResolver for InnertubeAudioResolver {
     async fn warm_up(&self, cancellation: &CancellationToken) -> Result<(), AudioSourceError> {
         InnertubeAudioResolver::warm_up(self, cancellation).await
+    }
+
+    async fn warm_up_session(&self, cancellation: &CancellationToken) {
+        // Client versions and guest visitor data cost a first playback about
+        // a second when fetched on demand.
+        let _ = tokio::join!(
+            self.player_client_candidates(PlayerClientPlan::Playback),
+            self.guest_visitor_data(None, cancellation),
+        );
     }
 
     async fn resolve(

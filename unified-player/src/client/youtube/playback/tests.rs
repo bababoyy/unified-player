@@ -14,7 +14,7 @@ use super::{
     parse_signature_timestamp, parse_tv_client_version, parse_visitor_data, playable_formats,
     replayable_browser_headers, sapisid_authorization, select_audio_format, set_query_parameter,
     should_retry_browser_session_transport, should_use_browser_session_transport,
-    validate_media_url, AdaptiveFormat, AudioSourceError, AudioSourceErrorKind,
+    validate_media_url, whole_media_ranges, AdaptiveFormat, AudioSourceError, AudioSourceErrorKind,
     AudioSourceResolver, BrowserAudioTarget, InnertubeAudioResolver, MediaTransportDiagnostic,
     PlayerResponse, PoTokenMaterial, RequestAuth, YouTubeProbeClient, MEDIA_RANGE_CHUNK_BYTES,
     PLAYER_RESPONSE_COPY_LIMIT,

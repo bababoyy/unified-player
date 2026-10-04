@@ -23,6 +23,9 @@ binary compatibility or a published release cadence.
 - Track changes on the integrated device are shown from the player's own
   metadata instead of a Web API playback read, and the Spotify queue is only
   read automatically while it is visible.
+- Started YouTube Music tracks faster: tracks up to 32 MiB are fetched whole
+  and decoded from memory instead of one range request per MP4 fragment, and
+  the public client material a first playback needs is fetched at startup.
 
 ## Release policy
 

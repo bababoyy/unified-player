@@ -170,6 +170,16 @@ fn bounded_media_ranges_keep_the_total_resource_length() {
 }
 
 #[test]
+fn whole_media_ranges_cover_the_file_without_overlap() {
+    assert_eq!(
+        whole_media_ranges(2_500, 1_000),
+        [(0, 999), (1_000, 1_999), (2_000, 2_499)]
+    );
+    assert_eq!(whole_media_ranges(1_000, 1_000), [(0, 999)]);
+    assert!(whole_media_ranges(0, 1_000).is_empty());
+}
+
+#[test]
 fn media_ranges_use_the_standard_http_header() {
     assert_eq!(
         media_range_header(1_048_576, 1_114_111),

@@ -127,8 +127,12 @@ source. After that authenticated request returns `OK`, the resolver opens the
 same media in the muted, headless dedicated profile and captures the official
 web player's per-video, playback-origin-token-bearing MP4 request. SABR-only
 query parameters are removed before the URL enters the native ranged transport.
-The sanitized media URL is requested with the standard HTTP `Range` header for
-initial, continuation, and seek requests.
+The sanitized media URL is requested with the standard HTTP `Range` header.
+A track of up to 32 MiB (about 30 minutes of audio) is fetched whole as four
+parallel 1 MiB ranges and decoded from memory: probing a fragmented MP4 reads
+every fragment header, which over a streamed source costs one request per
+fragment. Larger tracks, and any track whose whole fetch fails, are streamed
+with initial, continuation, and seek range requests.
 The resolver proves a nonzero byte range before publishing playback, preventing
 a tokenless preview fragment from being mistaken for a complete track. The
 dedicated browser-session fallback remains gated strictly on `Decipher` after
@@ -137,6 +141,11 @@ not enter it. The bounded public Android VR fallback is considered only after
 the authenticated client matrix reports provider unavailability or unsupported
 formats. Diagnostics name the browser path `WEB_MUSIC_BROWSER_SESSION` and the
 public path `ANDROID_VR`.
+
+When YouTube Music credentials are ready, the app fetches the public client
+versions and a guest visitor identifier at startup, even if Spotify is the
+active provider. These requests send no account cookies or proof tokens; they
+spare the first playback about a second.
 
 The browser is bounded rather than permanently resident. The current-track
 resolution leaves one hidden process warm just long enough for the existing
