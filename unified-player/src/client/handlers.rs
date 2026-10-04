@@ -154,9 +154,9 @@ impl PlayerEventHandlerState {
 const NATIVE_QUEUE_REFRESH_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Slowest periodic playback read while this app's integrated player owns
-/// Spotify playback. Its events keep the state current; the read only
-/// reconciles missed events and notices another device taking over.
-const LOCAL_PLAYBACK_POLL_INTERVAL: Duration = Duration::from_secs(20);
+/// Spotify playback. Its events keep the state current and its session events
+/// report another device taking over, so the read only reconciles missed events.
+const LOCAL_PLAYBACK_POLL_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Interval between periodic Spotify playback reads, or `None` when none is
 /// needed. `configured` is `playback_refresh_duration_in_ms`; zero disables
@@ -170,14 +170,9 @@ fn playback_poll_interval(
     {
         return None;
     }
-    let on_integrated_device = player.integrated_device_id.as_deref().is_some_and(|id| {
-        player
-            .playback
-            .as_ref()
-            .and_then(|playback| playback.device.id.as_deref())
-            == Some(id)
-    });
-    Some(if on_integrated_device {
+    // The session events are authoritative; a Web API device id can be stale
+    // right after another device took over.
+    Some(if player.active_integrated_device_id().is_some() {
         configured.max(LOCAL_PLAYBACK_POLL_INTERVAL)
     } else {
         configured
@@ -385,6 +380,12 @@ fn handle_playback_change_event(
     client_pub: &crate::client::ClientRequestSender,
     handler_state: &mut PlayerEventHandlerState,
 ) -> anyhow::Result<()> {
+    // An automatic queue read only serves a visible queue; opening the queue
+    // page reads it.
+    let queue_visible = {
+        let ui = state.ui.lock_untracked();
+        matches!(ui.current_page(), PageState::Queue { .. }) || ui.workspace_layout.show_right
+    };
     let player = state.player.read();
     let (playback, duration) = match (
         player.buffered_playback.as_ref(),
@@ -404,15 +405,20 @@ fn handle_playback_change_event(
         }
     };
 
-    if let Some(progress) = player.playback_progress() {
-        // update the playback when the current track ends
-        if progress >= duration && playback.is_playing {
-            client_pub.send(ClientRequest::GetCurrentPlayback)?;
+    // The integrated player reports its own track changes.
+    if player.active_integrated_device_id().is_none() {
+        if let Some(progress) = player.playback_progress() {
+            // update the playback when the current track ends
+            if progress >= duration && playback.is_playing {
+                client_pub.send(ClientRequest::GetCurrentPlayback)?;
+            }
         }
     }
 
     let refresh_guard = handler_state.native_queue_refresh.request_for(
-        player.automatic_native_queue_refresh_guard(),
+        player
+            .automatic_native_queue_refresh_guard()
+            .filter(|_| queue_visible),
         Instant::now(),
     );
     drop(player);
@@ -714,11 +720,15 @@ mod tests {
                 "actions": {"disallows": {}}
             }))
             .unwrap();
-            PlayerState {
+            let mut player = PlayerState {
                 playback: Some(playback),
                 integrated_device_id: Some("integrated".to_owned()),
                 ..PlayerState::default()
+            };
+            if device == "integrated" {
+                player.apply_integrated_session_event(1, true);
             }
+            player
         }
 
         #[test]
@@ -728,8 +738,8 @@ mod tests {
                 Some(LOCAL_PLAYBACK_POLL_INTERVAL)
             );
             assert_eq!(
-                playback_poll_interval(Duration::from_secs(60), &playing_on("integrated")),
-                Some(Duration::from_secs(60))
+                playback_poll_interval(Duration::from_secs(120), &playing_on("integrated")),
+                Some(Duration::from_secs(120))
             );
             assert_eq!(
                 playback_poll_interval(CONFIGURED, &playing_on("phone")),
@@ -737,6 +747,16 @@ mod tests {
             );
             assert_eq!(
                 playback_poll_interval(CONFIGURED, &PlayerState::default()),
+                Some(CONFIGURED)
+            );
+        }
+
+        #[test]
+        fn stale_web_api_device_after_takeover_uses_the_setting() {
+            let mut player = playing_on("integrated");
+            player.apply_integrated_session_event(1, false);
+            assert_eq!(
+                playback_poll_interval(CONFIGURED, &player),
                 Some(CONFIGURED)
             );
         }

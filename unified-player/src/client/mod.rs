@@ -161,6 +161,17 @@ impl AppClient {
         .map(str::to_owned)
     }
 
+    /// The integrated device id while it is connected and the active Spotify Connect
+    /// device, i.e. while spirc commands take effect.
+    pub(super) async fn active_integrated_spotify_device_id(
+        &self,
+        state: &crate::state::SharedState,
+    ) -> Option<String> {
+        let connected = self.connected_integrated_spotify_device_id().await?;
+        let player = state.player.read();
+        (player.active_integrated_device_id() == Some(connected.as_str())).then_some(connected)
+    }
+
     #[cfg(feature = "streaming")]
     pub(super) fn start_integrated_spotify_tracks(
         &self,

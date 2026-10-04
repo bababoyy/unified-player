@@ -403,9 +403,31 @@ pub struct PlayerState {
     /// streaming connection starts. It is not cleared on shutdown: Spotify
     /// stops reporting playback on a device once its connection is gone.
     pub integrated_device_id: Option<String>,
+
+    /// Streaming connection whose integrated player currently holds the Spotify
+    /// Connect active role, as reported by its own session events. Spotify
+    /// ignores spirc commands sent to an inactive device.
+    pub integrated_device_active_connection: Option<u64>,
 }
 
 impl PlayerState {
+    /// Device id of the integrated player while it is the active Spotify Connect device.
+    pub fn active_integrated_device_id(&self) -> Option<&str> {
+        self.integrated_device_active_connection
+            .and(self.integrated_device_id.as_deref())
+    }
+
+    /// Record a session event from the integrated player of `connection`.
+    #[cfg(any(feature = "streaming", test))]
+    pub fn apply_integrated_session_event(&mut self, connection: u64, active: bool) {
+        if active {
+            self.integrated_device_active_connection = Some(connection);
+        } else if self.integrated_device_active_connection == Some(connection) {
+            // A replaced connection can report its disconnect after the new one activated.
+            self.integrated_device_active_connection = None;
+        }
+    }
+
     /// Return the provider that owns the current playback surface, independent
     /// of the provider currently selected for browsing.
     pub fn playing_provider(&self) -> Option<crate::config::ActiveProvider> {
@@ -1227,6 +1249,33 @@ mod tests {
             .apply_spotify_playback_event(&SpotifyPlaybackEvent::VolumeChanged { volume: 50 }));
         assert_eq!(state.buffered_playback.as_ref().unwrap().volume, Some(50));
         assert_eq!(state.buffered_playback.as_ref().unwrap().mute_state, None);
+    }
+
+    #[test]
+    fn integrated_device_is_active_only_between_its_session_events() {
+        let mut player = PlayerState {
+            integrated_device_id: Some("integrated".to_owned()),
+            ..PlayerState::default()
+        };
+        assert_eq!(player.active_integrated_device_id(), None);
+
+        player.apply_integrated_session_event(1, true);
+        assert_eq!(player.active_integrated_device_id(), Some("integrated"));
+
+        player.apply_integrated_session_event(1, false);
+        assert_eq!(player.active_integrated_device_id(), None);
+    }
+
+    #[test]
+    fn replaced_connection_disconnect_keeps_its_successor_active() {
+        let mut player = PlayerState {
+            integrated_device_id: Some("integrated".to_owned()),
+            ..PlayerState::default()
+        };
+        player.apply_integrated_session_event(1, true);
+        player.apply_integrated_session_event(2, true);
+        player.apply_integrated_session_event(1, false);
+        assert_eq!(player.active_integrated_device_id(), Some("integrated"));
     }
 
     #[test]

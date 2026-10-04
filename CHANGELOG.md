@@ -13,6 +13,16 @@ binary compatibility or a published release cadence.
   from the first-visit README flow.
 - Kept YouTube Music behavior explicitly experimental where it depends on
   unofficial APIs or browser-session playback.
+- Kept the integrated Spotify device usable while the Spotify Web API is rate
+  limited: it stays in the device list, and playback controls on it go through
+  Spotify Connect instead of the Web API.
+- Reduced Spotify Web API reads: controls on the integrated device no longer
+  trigger a playback read, the periodic read while it plays slowed to 60 s, and
+  reopening Liked Songs reads one page instead of the whole library when it
+  has not changed.
+- Track changes on the integrated device are shown from the player's own
+  metadata instead of a Web API playback read, and the Spotify queue is only
+  read automatically while it is visible.
 
 ## Release policy
 

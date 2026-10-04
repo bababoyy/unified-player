@@ -220,6 +220,79 @@ impl AppClient {
             }
             new_playback
         };
+        self.finish_spotify_playback_update(state, new_playback)
+            .await
+    }
+
+    /// Show a track change of the integrated player from librespot metadata.
+    /// On success the pending Web API playback read is cancelled; on failure it
+    /// remains the fallback.
+    #[cfg(feature = "streaming")]
+    pub(crate) async fn project_integrated_track_change(
+        &self,
+        state: &SharedState,
+        id: rspotify::model::PlayableId<'static>,
+    ) -> Result<()> {
+        use librespot_metadata::Metadata as _;
+
+        let rspotify::model::PlayableId::Track(track_id) = id else {
+            anyhow::bail!("only tracks are projected from integrated metadata");
+        };
+        let session = self
+            .spotify
+            .session_if_present()
+            .await
+            .context("no Spotify session")?;
+        let uri = librespot_core::SpotifyUri::from_uri(&track_id.uri())?;
+        let metadata = librespot_metadata::Track::get(&session, &uri).await?;
+        let track = super::provider_metadata::full_track_from_integrated_metadata(metadata)?;
+        let new_playback = {
+            let mut player = state.player.write();
+            let Some(playback) = player.playback.as_mut() else {
+                anyhow::bail!("no Spotify playback to update");
+            };
+            let new_playback = !matches!(
+                &playback.item,
+                Some(rspotify::model::PlayableItem::Track(current)) if current.id == track.id
+            );
+            playback.item = Some(rspotify::model::PlayableItem::Track(track));
+            playback.progress = Some(chrono::Duration::zero());
+            playback.timestamp = chrono::Utc::now();
+            player.playback_last_updated_time = Some(Instant::now());
+            new_playback
+        };
+        self.cancel_spotify_playback_update();
+        self.finish_spotify_playback_update(state, new_playback)
+            .await
+    }
+
+    /// Read playback once after a start. The started context is not in the
+    /// integrated player's events, so this read is not cancelled by a
+    /// track-change projection.
+    pub(super) fn read_spotify_playback_after_start(&self, state: &SharedState) {
+        let client = self.clone();
+        let state = state.clone();
+        tokio::task::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            if let Err(err) = client.retrieve_current_playback(&state, false).await {
+                crate::observability::log_safe_error!(
+                    error,
+                    crate::observability::DiagnosticCode::SPOTIFY_PLAYBACK_REFRESH_FAILED,
+                    crate::observability::ErrorCategory::Unavailable,
+                    &err,
+                    "Failed to read Spotify playback after a start"
+                );
+            }
+        });
+    }
+
+    /// Persist the Spotify session and, for a new item, record it in the
+    /// history and load its genres and cover.
+    async fn finish_spotify_playback_update(
+        &self,
+        state: &SharedState,
+        new_playback: bool,
+    ) -> Result<()> {
         self.refresh_and_persist_session(state, config::ActiveProvider::Spotify);
 
         if !new_playback {

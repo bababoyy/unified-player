@@ -1017,8 +1017,171 @@ fn track_from_integrated_metadata(
     })
 }
 
+#[cfg(feature = "streaming")]
+/// The Web API form of a track from librespot metadata, so integrated playback
+/// can show a new track without a Web API read.
+pub(super) fn full_track_from_integrated_metadata(
+    track: librespot_metadata::Track,
+) -> Result<rspotify::model::FullTrack> {
+    let mut covers = track
+        .album
+        .covers
+        .0
+        .iter()
+        .filter_map(|image| {
+            Some(IntegratedCover {
+                url: format!("https://i.scdn.co/image/{}", image.id.to_base16().ok()?),
+                width: u32::try_from(image.width).ok().filter(|width| *width > 0),
+                height: u32::try_from(image.height)
+                    .ok()
+                    .filter(|height| *height > 0),
+            })
+        })
+        .collect::<Vec<_>>();
+    // The UI shows the first album image, which the Web API lists largest first.
+    covers.sort_by_key(|cover| std::cmp::Reverse(cover.width));
+    let album_type = track.album.type_str.to_ascii_lowercase();
+    let id = TrackId::from_uri(&track.id.to_uri()?)?.into_static();
+    full_track_from_parts(IntegratedTrackParts {
+        id,
+        name: track.name,
+        artists: track
+            .artists
+            .0
+            .into_iter()
+            .filter_map(artist_from_integrated_metadata)
+            .collect(),
+        album: album_from_integrated_metadata(track.album).context("convert album metadata")?,
+        album_type,
+        covers,
+        disc_number: track.disc_number,
+        track_number: track.number,
+        duration_ms: track.duration,
+        explicit: track.is_explicit,
+    })
+}
+
+#[cfg(any(feature = "streaming", test))]
+struct IntegratedCover {
+    url: String,
+    width: Option<u32>,
+    height: Option<u32>,
+}
+
+#[cfg(any(feature = "streaming", test))]
+struct IntegratedTrackParts {
+    id: TrackId<'static>,
+    name: String,
+    artists: Vec<Artist>,
+    album: Album,
+    album_type: String,
+    covers: Vec<IntegratedCover>,
+    disc_number: i32,
+    track_number: i32,
+    duration_ms: i32,
+    explicit: bool,
+}
+
+#[cfg(any(feature = "streaming", test))]
+fn full_track_from_parts(parts: IntegratedTrackParts) -> Result<rspotify::model::FullTrack> {
+    let artist = |artist: &Artist| {
+        serde_json::json!({
+            "external_urls": {},
+            "href": null,
+            "id": artist.id.id(),
+            "name": artist.name,
+        })
+    };
+    let value = serde_json::json!({
+        "album": {
+            "album_type": parts.album_type,
+            "artists": parts.album.artists.iter().map(artist).collect::<Vec<_>>(),
+            "external_urls": {},
+            "href": null,
+            "id": parts.album.id.id(),
+            "images": parts.covers.iter().map(|cover| serde_json::json!({
+                "url": cover.url,
+                "width": cover.width,
+                "height": cover.height,
+            })).collect::<Vec<_>>(),
+            "name": parts.album.name,
+            "release_date": parts.album.release_date,
+            "release_date_precision": "day",
+        },
+        "artists": parts.artists.iter().map(artist).collect::<Vec<_>>(),
+        "disc_number": parts.disc_number,
+        "duration_ms": parts.duration_ms,
+        "explicit": parts.explicit,
+        "external_ids": {},
+        "external_urls": {},
+        "href": null,
+        "id": parts.id.id(),
+        "is_local": false,
+        "is_playable": true,
+        "name": parts.name,
+        "preview_url": null,
+        "track_number": parts.track_number,
+        "type": "track",
+    });
+    serde_json::from_value(value).context("build a Spotify track from integrated metadata")
+}
+
 fn paging_query_values(page_limit: usize, offset: usize) -> (String, String) {
     (page_limit.to_string(), offset.to_string())
+}
+
+#[cfg(test)]
+mod integrated_full_track_tests {
+    use super::{full_track_from_parts, IntegratedCover, IntegratedTrackParts};
+    use crate::state::{Album, AlbumId, Artist, ArtistId, TrackId};
+    use rspotify::prelude::*;
+
+    #[test]
+    fn integrated_metadata_builds_a_web_api_track_with_its_cover() {
+        let artist = Artist {
+            id: ArtistId::from_id("0000000000000000000001").unwrap(),
+            name: "Artist".to_owned(),
+        };
+        let track = full_track_from_parts(IntegratedTrackParts {
+            id: TrackId::from_id("0000000000000000000002").unwrap(),
+            name: "Song".to_owned(),
+            artists: vec![artist.clone()],
+            album: Album {
+                id: AlbumId::from_id("0000000000000000000003").unwrap(),
+                release_date: "2026-01-02".to_owned(),
+                name: "Record".to_owned(),
+                artists: vec![artist],
+                typ: None,
+                added_at: 0,
+            },
+            album_type: "album".to_owned(),
+            covers: vec![IntegratedCover {
+                url: "https://i.scdn.co/image/ab67616d0000b273".to_owned(),
+                width: Some(640),
+                height: Some(640),
+            }],
+            disc_number: 1,
+            track_number: 4,
+            duration_ms: 185_000,
+            explicit: true,
+        })
+        .unwrap();
+
+        assert_eq!(
+            track.id.as_ref().map(|id| id.id().to_owned()).as_deref(),
+            Some("0000000000000000000002")
+        );
+        assert_eq!(track.name, "Song");
+        assert_eq!(track.artists[0].name, "Artist");
+        assert_eq!(track.album.name, "Record");
+        assert_eq!(
+            crate::utils::get_track_album_image_url(&track),
+            Some("https://i.scdn.co/image/ab67616d0000b273")
+        );
+        assert_eq!(track.duration, chrono::Duration::milliseconds(185_000));
+        assert_eq!(track.track_number, 4);
+        assert!(track.explicit);
+    }
 }
 
 #[cfg(test)]
