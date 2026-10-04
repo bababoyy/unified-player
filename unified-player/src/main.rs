@@ -319,6 +319,15 @@ async fn start_app(
     {
         startup_client_pub.send(client::ClientRequest::GetYouTubeLibrary)?;
     }
+    if config::get_config().youtube_music_auth_status().is_ready() {
+        runtime.spawn_async("youtube-session-warmup", false, {
+            let client = client.clone();
+            async move {
+                client.warm_up_youtube_session().await;
+                Ok(())
+            }
+        });
+    }
 
     // client socket task (for handling CLI commands)
     runtime.spawn_async("client-socket", false, {

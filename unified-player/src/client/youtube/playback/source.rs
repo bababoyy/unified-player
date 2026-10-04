@@ -138,6 +138,12 @@ pub trait AudioSourceResolver: Send + Sync {
         Ok(())
     }
 
+    /// Fetch the public session material a first playback needs, without
+    /// starting the JavaScript runtime. Best effort, like [`Self::warm_up`].
+    async fn warm_up_session(&self, cancellation: &CancellationToken) {
+        let _ = cancellation;
+    }
+
     async fn resolve(
         &self,
         video_id: &str,
