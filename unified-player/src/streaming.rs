@@ -348,6 +348,23 @@ pub async fn new_connection(
                         .player
                         .write()
                         .apply_integrated_session_event(connection_id, false),
+                    player::PlayerEvent::Seeked {
+                        track_id,
+                        position_ms,
+                        ..
+                    }
+                    | player::PlayerEvent::PositionCorrection {
+                        track_id,
+                        position_ms,
+                        ..
+                    } => {
+                        if let Ok(uri) = track_id.to_uri() {
+                            state
+                                .player
+                                .write()
+                                .apply_integrated_position(&uri, *position_ms);
+                        }
+                    }
                     _ => {}
                 }
                 // Suppress Spotify's auto-resume of the previous session on

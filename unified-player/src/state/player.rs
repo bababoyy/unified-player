@@ -806,6 +806,17 @@ impl PlayerState {
     /// Publish an acknowledged Spotify seek without waiting for REST
     /// reconciliation. The instant is reset so the normal progress estimator
     /// continues from the requested position on the next frame.
+    /// Apply a position the integrated player reports without a track change,
+    /// such as `previous` restarting the track, if it is for the shown track.
+    #[cfg(any(feature = "streaming", test))]
+    pub fn apply_integrated_position(&mut self, track_uri: &str, position_ms: u32) -> bool {
+        let shown = self
+            .currently_playing()
+            .and_then(PlayableItem::id)
+            .is_some_and(|id| id.uri() == track_uri);
+        shown && self.apply_spotify_seek(chrono::Duration::milliseconds(i64::from(position_ms)))
+    }
+
     pub fn apply_spotify_seek(&mut self, position: chrono::Duration) -> bool {
         if position < chrono::Duration::zero() {
             return false;
@@ -1249,6 +1260,43 @@ mod tests {
             .apply_spotify_playback_event(&SpotifyPlaybackEvent::VolumeChanged { volume: 50 }));
         assert_eq!(state.buffered_playback.as_ref().unwrap().volume, Some(50));
         assert_eq!(state.buffered_playback.as_ref().unwrap().mute_state, None);
+    }
+
+    #[test]
+    fn integrated_restart_moves_the_shown_track_to_its_start() {
+        let track_id = "4iV5W9uYEdYUVa79Axb7Rh";
+        let mut player = PlayerState {
+            playback: Some(spotify_playback(track_id, true)),
+            ..PlayerState::default()
+        };
+        assert!(player.apply_integrated_position(&format!("spotify:track:{track_id}"), 0));
+        assert_eq!(
+            player
+                .playback
+                .as_ref()
+                .and_then(|playback| playback.progress),
+            Some(chrono::Duration::zero())
+        );
+    }
+
+    #[test]
+    fn integrated_position_for_another_track_is_ignored() {
+        let mut player = PlayerState {
+            playback: Some(spotify_playback("4iV5W9uYEdYUVa79Axb7Rh", true)),
+            ..PlayerState::default()
+        };
+        let before = player
+            .playback
+            .as_ref()
+            .and_then(|playback| playback.progress);
+        assert!(!player.apply_integrated_position("spotify:track:0000000000000000000001", 0));
+        assert_eq!(
+            player
+                .playback
+                .as_ref()
+                .and_then(|playback| playback.progress),
+            before
+        );
     }
 
     #[test]
